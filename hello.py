@@ -1,4 +1,5 @@
 import numpy as np
+from tqdm import tqdm
 
 class Network:
     def __init__(self, layers, layer_n):
@@ -13,11 +14,13 @@ class Network:
     def feedforward(self, input, do_rate = 1):
         op = input
         for layer in self.layers:
+
             #layer.dropout = np.random.binomial(p=do_rate, n=1, size=layer.w.shape)
             #layer.dropped_out = (np.ones(layer.w.shape) - layer.dropout) * layer.w
             #layer.w = layer.dropout * layer.w
             layer.calc(op)
             op = layer.output
+
         print(op)
 
     def online_bp(self, inputs, t_data, l_rate1, method, do_rate = 1, reg_rate = 0.0, weight_limit = 0.0, l_rate2 = 0.0):
@@ -33,20 +36,74 @@ class Network:
 
     def GD(self, inputs, t_data, l_rate, do_rate, reg_rate):
         print("GD method")
-        for i in range(len(inputs)):
+
+        for i in tqdm(range(len(inputs))):
+
             input = inputs[i]
             correct = t_data[i]
             self.feedforward(input, do_rate)
-            for layer in reversed(self.layers):
-                layer.delta = layer.output - correct if layer == self.layers[-1] \
-                         else layer.activation(layer.output, prime=True) * np.matmul(prev_layer.w.T, prev_layer.delta)
-                layer.dif = l_rate * np.matmul(layer.delta.reshape(len(layer.delta), 1), layer.input.reshape(1, len(layer.input))) + \
-                            reg_rate * np.linalg.norm(layer.w)
-                layer.w = layer.w - layer.dif
-                prev_layer = layer
-                #print(layer.w)
-            for layer in self.layers:
-                layer.w = layer.w * layer.dropout + layer.dropped_out
+            prev_layer = None
+            for layer in reversed(self.layers):#逆伝播 後ろの層が何か今の層は何かによって層の種類*層の種類のパターンが生じる
+                #print(type(layer))
+                #伝播フェーズ
+
+                if isinstance(prev_layer, type(None)):
+                    layer.delta = layer.output - np.array(correct).T
+
+
+
+                if isinstance(prev_layer, Aff):
+                    layer.delta = np.array(layer.activation(layer.output, prime=True)).T * np.matmul(prev_layer.w.T, prev_layer.delta).T
+
+                if isinstance(prev_layer, ReLU):
+                    layer.delta = (layer.inflow > 0) * prev_layer.delta
+
+                if isinstance(prev_layer, Pool) and prev_layer.pool_method == 'max':
+                    layer.delta = np.zeros_like(layer.output)
+                    for k in range(int(prev_layer.input_w / prev_layer.filter_w)):
+                        for j in range(int(prev_layer.input_h / prev_layer.filter_h)):
+                            sub_mat = prev_layer.input[prev_layer.filter_h * j: prev_layer.filter_h * (j + 1), prev_layer.filter_w * k: prev_layer.filter_w * (k + 1)]
+                            layer.delta[prev_layer.filter_h * j: prev_layer.filter_h * (j + 1), prev_layer.filter_w * k: prev_layer.filter_w * (k + 1)] += \
+                            (sub_mat == np.max(sub_mat)) * prev_layer.delta[j, k]
+
+                if isinstance(prev_layer, CVL2D):
+                    fprime = layer.activation(layer.inflow.reshape((prev_layer.input_h, prev_layer.input_w)), prime = True)
+                    a = np.zeros_like(prev_layer.input)
+                    for k in range(int(prev_layer.output_w)):
+                        for j in range(int(prev_layer.output_h)):
+                            a[j: j + prev_layer.filter_h, k: k + prev_layer.filter_w] += \
+                                np.array(prev_layer.w * prev_layer.input[j * prev_layer.stride:j * prev_layer.stride + prev_layer.filter_h, k * prev_layer.stride:k * prev_layer.stride + prev_layer.filter_w])
+                    layer.delta = fprime * a
+
+
+
+                #最適化フェーズ
+                if isinstance(layer, Aff):
+                    layer.dif = l_rate * np.matmul(layer.delta.reshape(layer.delta.shape[1] * layer.delta.shape[0], 1), layer.input.reshape(1, len(layer.input))) + \
+                                reg_rate * np.linalg.norm(layer.w)
+                    layer.w = layer.w - layer.dif
+                    layer.delta = layer.delta.reshape((layer.delta.shape[0] * layer.delta.shape[1], 1))
+                    prev_layer = layer
+                    # print(layer.w)
+                    # for layer in self.layers:
+                    #    layer.w = layer.w * layer.dropout + layer.dropped_out
+                if isinstance(layer, ReLU):
+                    prev_layer = layer
+                    layer.delta = layer.delta.reshape((layer.input_h, layer.input_w))
+                if isinstance(layer, Pool):
+                    prev_layer = layer
+
+                if isinstance(layer, CVL2D):
+                    for j in range(layer.filter_h):
+                        for k in range(layer.filter_w):
+                            a = layer.input[j: j + layer.output.shape[0], k: k + layer.output.shape[1]] * layer.w[j, k]
+                            layer.w[j, k] = layer.w[j, k] - (l_rate * a).sum()
+                    prev_layer = layer
+                #print(layer.delta)
+
+
+                    
+                    
 
     def AdaGrad(self, inputs, t_data, l_rate):
         print("あだぐら")
@@ -108,7 +165,7 @@ class Network:
 
 
 
-class FullyConnectedLayer:
+class Aff:
     def __init__(self, input_n, output_n, activation):
         self.input_n = input_n
         self.output_n = output_n
@@ -117,11 +174,12 @@ class FullyConnectedLayer:
         self.activation = activation
     def calc(self, input):
         self.input = input
+        self.inflow = np.matmul(self.w, self.input) + self.b
 
-        self.output = self.activation(np.matmul(self.w, self.input) + self.b)
+        self.output = self.activation(self.inflow)
 
 
-class ConvolutionalLayer2D:
+class CVL2D:
     def __init__(self, input_w, input_h,  activation,  filter_w, filter_h, stride = 1, pad = 0, pad_method = 'mean'):
         self.input_w = input_w
         self.input_h = input_h
@@ -132,6 +190,7 @@ class ConvolutionalLayer2D:
         self.filter_w = filter_w
         self.filter_h = filter_h
         self.stride = stride
+        self.b = np.random.rand()
         self.pad = pad
         self.pad_method = pad_method
         self.w = np.random.rand(filter_h, filter_w)
@@ -139,12 +198,13 @@ class ConvolutionalLayer2D:
 
     def calc(self, input):
         self.input = np.pad(input.reshape(self.input_h, self.input_w), self.pad, self.pad_method)
-        print(input)
-        self.output = np.array([[(self.w * self.input[j * self.stride:j * self.stride + self.filter_h, \
+
+        self.inflow = np.array([[(self.w * self.input[j * self.stride:j * self.stride + self.filter_h, \
                                              i * self.stride:i * self.stride + self.filter_w]).sum() \
                         for i in range(int(self.output_w))] for j in range(int(self.output_h))])
-        print(self.output)
-class ConvolutionalLayer3D:
+        self.output = self.activation(self.inflow) + self.b
+
+class CVL3D:
     def __init__(self, input_w, input_h, input_d, activation,  filter_w, filter_h, filter_d, stride = 1, pad = 0):
         self.input_w = input_w
         self.input_h = input_h
@@ -169,22 +229,24 @@ class ConvolutionalLayer3D:
                                               k * self.stride: k * self.stride + self.filter_d]).sum() \
                         for i in range(int(self.output_w))] for j in range(int(self.output_h))] for k in range(int(self.output_d))]
 
-class PoolingLayer:
-    def __init__(self, input_w, input_h, filter_w, filter_h, method = 'max'):
+class Pool:
+    def __init__(self, input_w, input_h, filter_w, filter_h, activation, method = 'max'):
         self.input_w = input_w
         self.input_h = input_h
         self.input_n = input_h * input_w
         self.filter_w = filter_w
         self.filter_h = filter_h
         self.pool_method = method
+        self.activation = activation
     def calc(self, input):
         self.input = input
         if self.pool_method == 'max':
-            self.max(input)
+
+            return self.max(input)
         elif self.pool_method == 'mean':
-            self.mean(input)
+            return self.mean(input)
         elif self.pool_method == 'min':
-            self.mean(input)
+            return self.mean(input)
 
 
 
@@ -193,29 +255,32 @@ class PoolingLayer:
                                         self.filter_h * i: self.filter_h * (i + 1)]) \
                                  for i in range(int(self.input_w / self.filter_w))] for j in
                                 range(int(self.input_h / self.filter_h))])
+        self.inflow = self.output
 
     def mean(self, input):
         self.output = np.array([[np.mean(self.input[self.filter_w * j: self.filter_w * (j + 1), \
                                         self.filter_h * i: self.filter_h * (i + 1)]) \
                                  for i in range(int(self.input_w / self.filter_w))] for j in
                                 range(int(self.input_h / self.filter_h))])
-
+        self.inflow = self.output
 
     def min(self, input):
         self.output = np.array([[np.min(self.input[self.filter_w * j: self.filter_w * (j + 1), \
                                          self.filter_h * i: self.filter_h * (i + 1)]) \
                                  for i in range(int(self.input_w / self.filter_w))] for j in
                                 range(int(self.input_h / self.filter_h))])
+        self.inflow = self.output
 
-class RectifiedLinearUnit:
-    def __init__(self, input_w, input_h):
+class ReLU:
+    def __init__(self, input_w, input_h, activation):
         self.input_w = input_w
         self.input_h = input_h
-
+        self.activation = activation
     def calc(self, input):
         self.input = input
         negative_to_zero = (input >= 0)
-        self.output = self.input * negative_to_zero
+        self.output = (self.input * negative_to_zero).reshape(self.input_w * self.input_h, 1)
+
 
 
 
@@ -246,29 +311,40 @@ def hinge(x, prime = False):
 
 
 
-net = Network([FullyConnectedLayer(5, 3, sigmoid),
-               FullyConnectedLayer(3, 2, sigmoid),
-FullyConnectedLayer(2, 784, sigmoid),
-FullyConnectedLayer(784, 28, sigmoid),
-FullyConnectedLayer(28, 20, sigmoid),
-FullyConnectedLayer(20, 2, sigmoid),
-               FullyConnectedLayer(2, 2, identity)], 1)
-net2 = Network([ConvolutionalLayer2D(28, 28, identity, 2, 2, stride = 1),
-               PoolingLayer(27, 27, 3, 3, 'mean'),
-                ConvolutionalLayer2D(9, 9, identity, 4, 4, stride=1),
-                PoolingLayer(6, 6, 3, 3, 'mean'),
-                RectifiedLinearUnit(2, 2)], 2)
+net = Network([Aff(5, 3, sigmoid),
+               Aff(3, 2, sigmoid),
+               Aff(2, 784, sigmoid),
+               Aff(784, 28, sigmoid),
+               Aff(28, 20, sigmoid),
+               Aff(20, 2, sigmoid),
+               Aff(2, 2, identity)], 1)
 
-ip = np.ones((100, 5))
-td = np.ones((100, 2))
-a = np.ones((5, 1))
-ip.fill(1)
-td.fill(10)
-gazo = np.random.rand(28, 28) - 0.5
-net2.feedforward(gazo)
+net2 = Network([CVL2D(28, 28, sigmoid, 23, 23, stride=1),
+                Pool(6, 6, 3, 3, identity, 'max'),
+                ReLU(2, 2, activation = identity),
+                Aff(4, 20, sigmoid),
+                Aff(20, 30, sigmoid),
+                Aff(30, 2, identity)
+                ],
+               2)
+
+
+ip = np.ones((100, 2))
+td = np.ones((100,  1, 2)) + 6
+td2 = np.ones((100, 1, 2)) + 20
+a = np.ones((28, 28)) + 6
+gazo = np.ones((100, 28, 28)) - 0.5
+gazo2 = np.ones((100, 28, 28)) + 10
+#Affスタートならたてベクトルを入れる
+#
+
+#def __init__(self, input_w, input_h):
+#net2.feedforward(gazo)
+
+net2.online_bp(np.concatenate((gazo, gazo2)), np.concatenate((td, td2)), method = net2.GD, l_rate1 = 0.001, do_rate = 1, reg_rate = 0.0, weight_limit = 0.0, l_rate2 = 0.0)
 #def online_bp(self, inputs, t_data, l_rate1, method, drop_out_rate = None, regularization = None, weight_limit = None, l_rate2 = None):
 #net.online_bp(ip, td, l_rate1 = 0.02, l_rate2 = 0.0, method = net.GD, do_rate = 0.9, reg_rate = 0.0)
-#net.feedforward(a)
+net2.feedforward(a)
 
 
 
